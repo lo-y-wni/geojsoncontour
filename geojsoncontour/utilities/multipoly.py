@@ -12,32 +12,22 @@ from .vertices import get_vertices_from_path
 class Orientation(enum.IntEnum):
     CW = enum.auto()
     CCW = enum.auto()
-    
 
 def orientation(vertices) -> Orientation:
-    """Determine orientation for a closed polygon
-
-    See https://en.wikipedia.org/wiki/Curve_orientation for an
-    explanation of this formula
     """
-    # Ignoring last index (which is duplicate of first)
-    vertices = vertices[:-1, :]
-    lowest_x_indices = np.flatnonzero(vertices[:, 0] == np.min(vertices[:, 0]))
-    lowest_y_indices = np.flatnonzero(vertices[lowest_x_indices, 1] == np.min(vertices[lowest_x_indices, 1]))
-    index = lowest_x_indices[lowest_y_indices[0]]
-    
-    prev_index = index - 1
-    next_index = (index + 1) % vertices.shape[0]
-    xa, ya = vertices[prev_index, :]
-    xb, yb = vertices[index, :]
-    xc, yc = vertices[next_index, :]
-
-    detO = (xb - xa)*(yc - ya) - (xc - xa)*(yb - ya)
-    if detO > 0:
+    Determines the orientation of a closed polygon using the signed area (shoelace formula).
+    Returns Orientation.CCW for counter-clockwise, Orientation.CW for clockwise.
+    """
+    # Remove duplicate closing vertex if present
+    if np.all(vertices[0] == vertices[-1]):
+        vertices = vertices[:-1]
+    x = vertices[:, 0]
+    y = vertices[:, 1]
+    area = 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+    if area > 0:
         return Orientation.CCW
     else:
         return Orientation.CW
-
 
 def multi_polygon(path, min_angle_deg, ndigits):
     # It seems matplotlib emits polygons in either CW or CCW order.
