@@ -23,7 +23,7 @@ def orientation(vertices) -> Orientation:
         vertices = vertices[:-1]
     x = vertices[:, 0]
     y = vertices[:, 1]
-    area = 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+    area = 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
     if area > 0:
         return Orientation.CCW
     else:
