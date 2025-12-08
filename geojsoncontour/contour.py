@@ -54,18 +54,19 @@ def contourf_to_geojson_overlap(contourf, geojson_filepath=None, min_angle_deg=N
     contourf_levels = get_contourf_levels(contourf.levels, contourf.extend)
     contourf_colors = contourf.get_facecolor()
     for path, level, color in zip(contourf.get_paths(), contourf_levels, contourf_colors):
-        for coord in get_vertices_from_path(path):
-            if min_angle_deg:
-                coord = keep_high_angle(coord, min_angle_deg)
-            if ndigits:
-                coord = np.around(coord, ndigits)
-            polygon = Polygon(coordinates=[coord.tolist()])
-            fcolor = rgb2hex(color)
-            properties = set_contourf_properties(stroke_width, fcolor, fill_opacity, level, unit)
-            if geojson_properties:
-                properties.update(geojson_properties)
-            feature = Feature(geometry=polygon, properties=properties)
-            polygon_features.append(feature)
+        polygon = multi_polygon(path, min_angle_deg, ndigits)
+        if not polygon.coordinates:
+            continue
+        fcolor = rgb2hex(color)
+        properties = set_contourf_properties(stroke_width, fcolor, fill_opacity, level, unit)
+        if geojson_properties:
+            properties.update(geojson_properties)
+        
+        # Split MultiPolygons into individual Polygon features for "overlap" style
+        # multi_polygon returns a MultiPolygon geometry, coordinates are [ [ [x,y], [x,y] (hole) ], ... ]
+        for poly_coords in polygon.coordinates:
+             feature = Feature(geometry=Polygon(poly_coords), properties=properties)
+             polygon_features.append(feature)
     feature_collection = FeatureCollection(polygon_features)
     return _render_feature_collection(feature_collection, geojson_filepath, strdump, serialize)
 
