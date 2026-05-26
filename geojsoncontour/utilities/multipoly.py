@@ -4,7 +4,6 @@
 import enum
 import math
 
-from geojson import MultiPolygon
 import numpy as np
 
 
@@ -14,71 +13,106 @@ class Orientation(enum.IntEnum):
 
 
 _AREA_EPSILON = 1e-12
+_DEDUP_ATOL = 1e-8
+_DEDUP_RTOL = 1e-5
+
+
+def _arrays_close(a, b, atol=_DEDUP_ATOL, rtol=_DEDUP_RTOL):
+    """Cheap stand-in for numpy.allclose that avoids the ufunc dispatch overhead.
+
+    Operates on small flat arrays (positions). Returns True when every component
+    is within atol + rtol * |b|.
+    """
+    diff = np.abs(a - b)
+    tol = atol + rtol * np.abs(b)
+    return bool((diff <= tol).all())
 
 
 def remove_consecutive_duplicate_vertices(vertices):
     vertices = np.asarray(vertices)
-    if len(vertices) == 0:
+    if len(vertices) <= 1:
         return vertices
-    keep = [True]
-    for index in range(1, len(vertices)):
-        keep.append(not np.allclose(vertices[index], vertices[index - 1]))
-    return vertices[np.array(keep)]
+    # Vectorised replacement for the previous per-row np.allclose loop. With N
+    # vertices we issue O(1) numpy operations instead of O(N).
+    prev = vertices[:-1]
+    diff = np.abs(vertices[1:] - prev)
+    tol = _DEDUP_ATOL + _DEDUP_RTOL * np.abs(prev)
+    same = (diff <= tol).all(axis=1)
+    keep = np.empty(len(vertices), dtype=bool)
+    keep[0] = True
+    keep[1:] = ~same
+    return vertices[keep]
 
 
 def _signed_area(vertices):
     if len(vertices) == 0:
         return 0.0
-    if np.allclose(vertices[0], vertices[-1]):
+    if vertices.shape[0] >= 2 and _arrays_close(vertices[0], vertices[-1]):
         vertices = vertices[:-1]
     if len(vertices) < 3:
         return 0.0
+    # Shoelace via slicing instead of np.roll to avoid the per-call axis
+    # normalisation overhead the profiler highlighted.
     x = vertices[:, 0]
     y = vertices[:, 1]
-    return 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
+    return 0.5 * float(np.dot(x, np.concatenate((y[1:], y[:1]))) -
+                       np.dot(np.concatenate((x[1:], x[:1])), y))
 
 
 def _clean_ring(vertices):
     vertices = remove_consecutive_duplicate_vertices(vertices)
     if len(vertices) == 0:
         return vertices
-    if not np.allclose(vertices[0], vertices[-1]):
+    if not _arrays_close(vertices[0], vertices[-1]):
         vertices = np.vstack([vertices, vertices[0]])
     vertices = remove_consecutive_duplicate_vertices(vertices)
     if len(vertices) == 0:
         return vertices
-    if not np.allclose(vertices[0], vertices[-1]):
+    if not _arrays_close(vertices[0], vertices[-1]):
         vertices = np.vstack([vertices, vertices[0]])
     return vertices
 
 
-def _point_on_segment(point, start, end):
-    segment = end - start
-    point_vector = point - start
-    cross_product = segment[0] * point_vector[1] - segment[1] * point_vector[0]
-    if not np.isclose(cross_product, 0.0):
-        return False
-    dot_product = np.dot(point_vector, segment)
-    if dot_product < 0:
-        return False
-    return dot_product <= np.dot(segment, segment)
-
-
 def _point_in_ring(point, ring):
+    """Vectorised point-in-polygon test with on-edge handling.
+
+    Replaces a per-segment Python loop that called numpy ufuncs (np.isclose,
+    np.dot) on 2-vectors. With N segments we now do O(1) numpy passes instead
+    of O(N) Python-level iterations.
+    """
     ring = np.asarray(ring)
-    inside = False
-    x, y = point
-    for start, end in zip(ring[:-1], ring[1:]):
-        if _point_on_segment(point, start, end):
+    if ring.shape[0] < 2:
+        return False
+    px = float(point[0])
+    py = float(point[1])
+
+    x0 = ring[:-1, 0]
+    y0 = ring[:-1, 1]
+    x1 = ring[1:, 0]
+    y1 = ring[1:, 1]
+
+    seg_x = x1 - x0
+    seg_y = y1 - y0
+    pv_x = px - x0
+    pv_y = py - y0
+
+    # On-edge fast path: collinear (cross ≈ 0) and within segment extent.
+    cross = seg_x * pv_y - seg_y * pv_x
+    collinear = np.abs(cross) <= _DEDUP_ATOL
+    if collinear.any():
+        dot = pv_x * seg_x + pv_y * seg_y
+        seg_len_sq = seg_x * seg_x + seg_y * seg_y
+        if (collinear & (dot >= 0.0) & (dot <= seg_len_sq)).any():
             return True
-        x0, y0 = start
-        x1, y1 = end
-        if (y0 > y) == (y1 > y):
-            continue
-        intersection_x = (x1 - x0) * (y - y0) / (y1 - y0) + x0
-        if x < intersection_x:
-            inside = not inside
-    return inside
+
+    # Ray casting (horizontal ray to the right of (px, py)).
+    crosses = (y0 > py) != (y1 > py)
+    if not crosses.any():
+        return False
+    # Avoid division by zero on segments with y0 == y1; those have crosses=False.
+    dy = np.where(crosses, y1 - y0, 1.0)
+    ix = (x1 - x0) * (py - y0) / dy + x0
+    return bool(int(np.count_nonzero(crosses & (px < ix))) & 1)
 
 
 def _ensure_orientation(vertices, desired_orientation):
@@ -163,7 +197,7 @@ def multi_polygon(path, min_angle_deg, ndigits):
             hole_coordinates.tolist()
         )
 
-    return MultiPolygon(coordinates=polygons)
+    return {"type": "MultiPolygon", "coordinates": polygons}
 
 
 def unit_vector(vector):
@@ -189,7 +223,7 @@ def keep_high_angle(vertices, min_angle_deg):
     if len(v) <= 2:
         return v
 
-    is_closed = np.allclose(v[0], v[-1])
+    is_closed = _arrays_close(v[0], v[-1])
     if is_closed:
         ring = v[:-1]
         if len(ring) < 3:

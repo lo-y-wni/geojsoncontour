@@ -1,12 +1,10 @@
 """Transform matplotlib.contour(f) to GeoJSON."""
 
+import json
 import warnings
 
-import geojson
 import numpy as np
 from matplotlib.colors import rgb2hex
-from geojson import Feature, LineString
-from geojson import Polygon, FeatureCollection
 
 from .utilities.multipoly import (
     remove_consecutive_duplicate_vertices,
@@ -90,7 +88,7 @@ def contour_to_geojson(contour, geojson_filepath=None, min_angle_deg=None,
                 # Matplotlib sometimes emits empty paths which
                 # can be ignored
                 continue
-            line = LineString(coordinates.tolist())
+            geometry = {"type": "LineString", "coordinates": coordinates.tolist()}
             level_value = safe_json_number(level)
             properties = {
                 "stroke-width": stroke_width,
@@ -102,9 +100,13 @@ def contour_to_geojson(contour, geojson_filepath=None, min_angle_deg=None,
                 properties["level-value"] = level_value
             if geojson_properties:
                 properties.update(geojson_properties)
-            line_features.append(Feature(geometry=line, properties=properties))
+            line_features.append({
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": properties,
+            })
 
-    feature_collection = FeatureCollection(line_features)
+    feature_collection = {"type": "FeatureCollection", "features": line_features}
     return _render_feature_collection(feature_collection, geojson_filepath, strdump, serialize)
 
 
@@ -123,7 +125,7 @@ def contourf_to_geojson_overlap(contourf, geojson_filepath=None, min_angle_deg=N
     ):
         title, lower, upper = level_info
         polygon = multi_polygon(path, min_angle_deg, ndigits)
-        if not polygon.coordinates:
+        if not polygon["coordinates"]:
             continue
         fcolor = rgb2hex(color)
         properties = set_contourf_properties(
@@ -134,10 +136,13 @@ def contourf_to_geojson_overlap(contourf, geojson_filepath=None, min_angle_deg=N
             properties.update(geojson_properties)
 
         # Split MultiPolygons into individual Polygon features for "overlap" style
-        for poly_coords in polygon.coordinates:
-            feature = Feature(geometry=Polygon(poly_coords), properties=properties)
-            polygon_features.append(feature)
-    feature_collection = FeatureCollection(polygon_features)
+        for poly_coords in polygon["coordinates"]:
+            polygon_features.append({
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": poly_coords},
+                "properties": properties,
+            })
+    feature_collection = {"type": "FeatureCollection", "features": polygon_features}
     return _render_feature_collection(feature_collection, geojson_filepath, strdump, serialize)
 
 
@@ -163,7 +168,7 @@ def contourf_to_geojson(contourf, geojson_filepath=None, min_angle_deg=None,
     ):
         title, lower, upper = level_info
         polygon = multi_polygon(path, min_angle_deg, ndigits)
-        if not polygon.coordinates:
+        if not polygon["coordinates"]:
             continue
         fcolor = rgb2hex(color)
         current_fill_opacity = fill_opacity
@@ -175,16 +180,24 @@ def contourf_to_geojson(contourf, geojson_filepath=None, min_angle_deg=None,
         )
         if geojson_properties:
             properties.update(geojson_properties)
-        feature = Feature(geometry=polygon, properties=properties)
-        polygon_features.append(feature)
-    feature_collection = FeatureCollection(polygon_features)
+        polygon_features.append({
+            "type": "Feature",
+            "geometry": polygon,
+            "properties": properties,
+        })
+    feature_collection = {"type": "FeatureCollection", "features": polygon_features}
     return _render_feature_collection(feature_collection, geojson_filepath, strdump, serialize)
 
 
 def _render_feature_collection(feature_collection, geojson_filepath, strdump, serialize):
     if not serialize:
         return feature_collection
+    # Use the stdlib json encoder directly. allow_nan=False enforces RFC 7946
+    # §3.1.1 (no NaN/Infinity in JSON output). Our properties have already been
+    # sanitised via safe_json_number so this should never raise on valid input.
     if strdump or not geojson_filepath:
-        return geojson.dumps(feature_collection, sort_keys=True, separators=(',', ':'))
+        return json.dumps(feature_collection, sort_keys=True,
+                          separators=(',', ':'), allow_nan=False)
     with open(geojson_filepath, 'w') as fileout:
-        geojson.dump(feature_collection, fileout, sort_keys=True, separators=(',', ':'))
+        json.dump(feature_collection, fileout, sort_keys=True,
+                  separators=(',', ':'), allow_nan=False)
