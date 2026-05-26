@@ -1,5 +1,7 @@
 """Transform matplotlib.contour(f) to GeoJSON."""
 
+import warnings
+
 import geojson
 import numpy as np
 from matplotlib.colors import rgb2hex
@@ -10,18 +12,69 @@ from .utilities.multipoly import (
     remove_consecutive_duplicate_vertices,
     multi_polygon,
     keep_high_angle,
+    safe_json_number,
     set_contourf_properties,
     get_contourf_levels
 )
 from .utilities.vertices import get_vertices_from_path
 
 
+_WGS84_LON_RANGE = (-180.0, 180.0)
+_WGS84_LAT_RANGE = (-90.0, 90.0)
+_RFC7946_RECOMMENDED_PRECISION = 6
+
+
+def _warn_precision(ndigits):
+    if ndigits is None:
+        warnings.warn(
+            "ndigits=None preserves full float64 precision. "
+            "RFC 7946 §11.2 recommends no more than 6 decimal places.",
+            stacklevel=3,
+        )
+    elif ndigits > _RFC7946_RECOMMENDED_PRECISION:
+        warnings.warn(
+            f"ndigits={ndigits} exceeds the RFC 7946 §11.2 recommendation of "
+            f"{_RFC7946_RECOMMENDED_PRECISION} decimal places.",
+            stacklevel=3,
+        )
+
+
+def _warn_paths_outside_wgs84(paths):
+    """Emit a single warning if any path vertex is outside the WGS 84 range.
+
+    Performed once per top-level call by sampling each Path's bounding box,
+    which is cheap relative to walking every emitted ring/line and avoids the
+    nested ``warnings.catch_warnings`` contexts that previous versions used.
+    """
+    for path in paths:
+        vertices = path.vertices
+        if vertices.size == 0:
+            continue
+        lon = vertices[:, 0]
+        lat = vertices[:, 1]
+        if (
+            lon.min() < _WGS84_LON_RANGE[0]
+            or lon.max() > _WGS84_LON_RANGE[1]
+            or lat.min() < _WGS84_LAT_RANGE[0]
+            or lat.max() > _WGS84_LAT_RANGE[1]
+        ):
+            warnings.warn(
+                "Coordinates outside the WGS 84 range "
+                f"(lon {_WGS84_LON_RANGE}, lat {_WGS84_LAT_RANGE}); "
+                "RFC 7946 §4 requires WGS 84 longitude/latitude.",
+                stacklevel=3,
+            )
+            return
+
+
 def contour_to_geojson(contour, geojson_filepath=None, min_angle_deg=None,
                        ndigits=5, unit='', stroke_width=1, geojson_properties=None, strdump=False,
                        serialize=True):
     """Transform matplotlib.contour to geojson."""
-    line_features = []
+    _warn_precision(ndigits)
     paths = contour.get_paths()
+    _warn_paths_outside_wgs84(paths)
+    line_features = []
     colors = contour.get_edgecolors()
     levels = contour.levels
     for contour_index, (path, color, level) in enumerate(zip(paths, colors, levels)):
@@ -38,13 +91,15 @@ def contour_to_geojson(contour, geojson_filepath=None, min_angle_deg=None,
                 # can be ignored
                 continue
             line = LineString(coordinates.tolist())
+            level_value = safe_json_number(level)
             properties = {
                 "stroke-width": stroke_width,
                 "stroke": rgb2hex(color),
-                "title": f"{level:.2f} {unit}",
-                "level-value": float(f"{level:.6f}"),
-                "level-index": contour_index
+                "title": f"{level:.2f} {unit}" if level_value is not None else f"{unit}".strip(),
+                "level-index": contour_index,
             }
+            if level_value is not None:
+                properties["level-value"] = level_value
             if geojson_properties:
                 properties.update(geojson_properties)
             line_features.append(Feature(geometry=line, properties=properties))
@@ -57,20 +112,28 @@ def contourf_to_geojson_overlap(contourf, geojson_filepath=None, min_angle_deg=N
                                 ndigits=5, unit='', stroke_width=1, fill_opacity=.9,
                                 geojson_properties=None, strdump=False, serialize=True):
     """Transform matplotlib.contourf to geojson with overlapping filled contours."""
+    _warn_precision(ndigits)
+    paths = contourf.get_paths()
+    _warn_paths_outside_wgs84(paths)
     polygon_features = []
     contourf_levels = get_contourf_levels(contourf.levels, contourf.extend)
     contourf_colors = contourf.get_facecolor()
-    for path, level, color in zip(contourf.get_paths(), contourf_levels, contourf_colors):
+    for level_index, (path, level_info, color) in enumerate(
+        zip(paths, contourf_levels, contourf_colors)
+    ):
+        title, lower, upper = level_info
         polygon = multi_polygon(path, min_angle_deg, ndigits)
         if not polygon.coordinates:
             continue
         fcolor = rgb2hex(color)
-        properties = set_contourf_properties(stroke_width, fcolor, fill_opacity, level, unit)
+        properties = set_contourf_properties(
+            stroke_width, fcolor, fill_opacity, title, unit,
+            level_index=level_index, level_lower=lower, level_upper=upper,
+        )
         if geojson_properties:
             properties.update(geojson_properties)
 
         # Split MultiPolygons into individual Polygon features for "overlap" style
-        # multi_polygon returns a MultiPolygon geometry, coordinates are [ [ [x,y], [x,y] (hole) ], ... ]
         for poly_coords in polygon.coordinates:
             feature = Feature(geometry=Polygon(poly_coords), properties=properties)
             polygon_features.append(feature)
@@ -82,6 +145,9 @@ def contourf_to_geojson(contourf, geojson_filepath=None, min_angle_deg=None,
                         ndigits=5, unit='', stroke_width=1, fill_opacity=.9, fill_opacity_range=None,
                         geojson_properties=None, strdump=False, serialize=True):
     """Transform matplotlib.contourf to geojson with MultiPolygons."""
+    _warn_precision(ndigits)
+    paths = contourf.get_paths()
+    _warn_paths_outside_wgs84(paths)
     polygon_features = []
     contourf_levels = get_contourf_levels(contourf.levels, contourf.extend)
     contourf_colors = contourf.get_facecolor()
@@ -92,9 +158,10 @@ def contourf_to_geojson(contourf, geojson_filepath=None, min_angle_deg=None,
         opacity_increment = (max_opacity - min_opacity) / opacity_steps
     else:
         variable_opacity = False
-    for contour_index, (path, level, color) in enumerate(
-        zip(contourf.get_paths(), contourf_levels, contourf_colors)
+    for contour_index, (path, level_info, color) in enumerate(
+        zip(paths, contourf_levels, contourf_colors)
     ):
+        title, lower, upper = level_info
         polygon = multi_polygon(path, min_angle_deg, ndigits)
         if not polygon.coordinates:
             continue
@@ -103,7 +170,8 @@ def contourf_to_geojson(contourf, geojson_filepath=None, min_angle_deg=None,
         if variable_opacity:
             current_fill_opacity = min_opacity + contour_index * opacity_increment
         properties = set_contourf_properties(
-            stroke_width, fcolor, current_fill_opacity, level, unit
+            stroke_width, fcolor, current_fill_opacity, title, unit,
+            level_index=contour_index, level_lower=lower, level_upper=upper,
         )
         if geojson_properties:
             properties.update(geojson_properties)

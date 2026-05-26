@@ -2,6 +2,7 @@
 # -*- encoding: utf-8 -*-
 """Helper module for transformation of matplotlib.contour(f) to GeoJSON."""
 import enum
+import math
 
 from geojson import MultiPolygon
 import numpy as np
@@ -216,25 +217,71 @@ def keep_high_angle(vertices, min_angle_deg):
     return np.array(accepted, dtype=vertices.dtype)
 
 
-def set_contourf_properties(stroke_width, fcolor, fill_opacity, level, unit):
+def safe_json_number(value, digits=6):
+    """Coerce a value to a finite float suitable for strict JSON.
+
+    RFC 7946 §3.1.1 / RFC 8259 do not permit NaN, Infinity, or -Infinity.
+    Returns None if the value cannot be represented as a finite JSON number.
+    """
+    if value is None:
+        return None
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(as_float) or math.isinf(as_float):
+        return None
+    return float(f"{as_float:.{digits}f}")
+
+
+def set_contourf_properties(stroke_width, fcolor, fill_opacity, level, unit,
+                             level_index=None, level_lower=None, level_upper=None):
     """Set property values for Polygon."""
-    return {
+    properties = {
         "stroke": fcolor,
         "stroke-width": stroke_width,
         "stroke-opacity": 1,
         "fill": fcolor,
         "fill-opacity": fill_opacity,
-        "title": "{} {}".format(level, unit)
+        "title": "{} {}".format(level, unit),
     }
+    if level_index is not None:
+        properties["level-index"] = int(level_index)
+    safe_lower = safe_json_number(level_lower)
+    safe_upper = safe_json_number(level_upper)
+    if safe_lower is not None:
+        properties["level-lower"] = safe_lower
+    if safe_upper is not None:
+        properties["level-upper"] = safe_upper
+    if safe_lower is not None and safe_upper is not None:
+        properties["level-value"] = safe_json_number(0.5 * (safe_lower + safe_upper))
+    elif safe_lower is not None:
+        properties["level-value"] = safe_lower
+    elif safe_upper is not None:
+        properties["level-value"] = safe_upper
+    return properties
 
 
 def get_contourf_levels(levels, extend):
-    mid_levels = ["%.2f" % levels[i] + '-' + "%.2f" % levels[i+1] for i in range(len(levels)-1)]
+    """Return a list of (label, lower, upper) for each contourf band.
+
+    `lower` / `upper` are floats or None for open-ended bands (extend='min'/'max'/'both').
+    `label` is a human-readable string preserved for the GeoJSON `title` property.
+    """
+    finite_levels = [float(level) for level in levels]
+    bands = []
+    for i in range(len(finite_levels) - 1):
+        lower = finite_levels[i]
+        upper = finite_levels[i + 1]
+        bands.append((f"{lower:.2f}-{upper:.2f}", lower, upper))
     if extend == 'both':
-        return ["<%.2f" % levels[0], *mid_levels, ">%.2f" % levels[-1]]
-    elif extend == 'max':
-        return [*mid_levels, ">%.2f" % levels[-1]]
-    elif extend == 'min':
-        return ["<%.2f" % levels[0], *mid_levels]
-    else:
-        return mid_levels
+        return [
+            (f"<{finite_levels[0]:.2f}", None, finite_levels[0]),
+            *bands,
+            (f">{finite_levels[-1]:.2f}", finite_levels[-1], None),
+        ]
+    if extend == 'max':
+        return [*bands, (f">{finite_levels[-1]:.2f}", finite_levels[-1], None)]
+    if extend == 'min':
+        return [(f"<{finite_levels[0]:.2f}", None, finite_levels[0]), *bands]
+    return bands

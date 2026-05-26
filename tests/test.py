@@ -19,18 +19,17 @@ class TestContourToGeoJson(unittest.TestCase):
     def tearDown(self):
         plt.close('all')
 
-
     @classmethod
     def setUpClass(cls):
         cls.config = ContourPlotConfig(level_lower=0.0, level_upper=202.0, unit='[unit]')
-        if os.path.exists(cls.geojson_file):
-            os.remove(cls.geojson_file)
-        if os.path.exists(cls.geojson_properties_file):
-            os.remove(cls.geojson_properties_file)
-        if os.path.exists(cls.geojson_file_contourf):
-            os.remove(cls.geojson_file_contourf)
-        if os.path.exists(cls.geojson_file_multipoly):
-            os.remove(cls.geojson_file_multipoly)
+        for path in (
+            cls.geojson_file,
+            cls.geojson_properties_file,
+            cls.geojson_file_contourf,
+            cls.geojson_file_multipoly,
+        ):
+            if os.path.exists(path):
+                os.remove(path)
 
     def create_contour(self):
         latrange, lonrange, Z = TestContourToGeoJson.create_grid_data()
@@ -39,7 +38,7 @@ class TestContourToGeoJson(unittest.TestCase):
         return ax.contour(
             lonrange, latrange, Z,
             levels=self.config.levels,
-            cmap=self.config.colormap
+            cmap=self.config.colormap,
         )
 
     def create_contourf(self):
@@ -49,7 +48,7 @@ class TestContourToGeoJson(unittest.TestCase):
         return ax.contourf(
             lonrange, latrange, Z,
             levels=self.config.levels,
-            cmap=self.config.colormap
+            cmap=self.config.colormap,
         )
 
     def test_matplotlib_contour_to_geojson(self):
@@ -340,6 +339,85 @@ class TestContourToGeoJson(unittest.TestCase):
         z = numpy.sin(x) * numpy.cos(y)
         contourf = plt.contourf(x, y, z)
         mp = geojsoncontour.contourf_to_geojson(contourf, ndigits=3)
+
+    def test_contour_with_nan_level_skips_level_value(self):
+        x = numpy.array([0.0, 1.0])
+        y = numpy.array([0.0, 1.0])
+        x, y = numpy.meshgrid(x, y)
+        z = x
+        contour = plt.contour(x, y, z, levels=[0.5])
+        # Inject a NaN level — RFC 7946/RFC 8259 disallow NaN as a JSON literal,
+        # so geojsoncontour must omit (or sanitize) the level-value property.
+        contour.levels = numpy.array([float("nan")])
+
+        result = geojsoncontour.contour_to_geojson(contour=contour, ndigits=3, strdump=True)
+        json.loads(result)  # must be strict JSON
+        parsed = json.loads(result)
+        for feature in parsed["features"]:
+            self.assertNotIn("level-value", feature["properties"])
+
+    def test_contourf_emits_numeric_level_metadata(self):
+        contourf = self.create_contourf()
+        result = geojsoncontour.contourf_to_geojson(
+            contourf=contourf, ndigits=3, serialize=False
+        )
+        self.assertGreater(len(result["features"]), 0)
+        for feature in result["features"]:
+            properties = feature["properties"]
+            self.assertIn("level-index", properties)
+            self.assertIsInstance(properties["level-index"], int)
+            self.assertIn("level-value", properties)
+            self.assertIsInstance(properties["level-value"], float)
+            self.assertIn("level-lower", properties)
+            self.assertIn("level-upper", properties)
+
+    def test_contourf_extend_emits_open_band_metadata(self):
+        x = numpy.linspace(0, 1, 10)
+        y = numpy.linspace(0, 1, 10)
+        x, y = numpy.meshgrid(x, y)
+        z = x + y
+        contourf = plt.contourf(
+            x, y, z, levels=[0.5, 1.0, 1.5], extend="both"
+        )
+        result = geojsoncontour.contourf_to_geojson(
+            contourf=contourf, ndigits=3, serialize=False
+        )
+        bands = [
+            (
+                feature["properties"].get("level-lower"),
+                feature["properties"].get("level-upper"),
+            )
+            for feature in result["features"]
+        ]
+        # For 'extend="both"' the first band has no lower bound and the last no upper.
+        self.assertIn((None, 0.5), bands)
+        self.assertIn((1.5, None), bands)
+
+    def test_warns_when_ndigits_exceeds_rfc7946_recommendation(self):
+        contour = self.create_contour()
+        import warnings
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            geojsoncontour.contour_to_geojson(
+                contour=contour, ndigits=None, strdump=True
+            )
+        messages = [str(w.message) for w in captured]
+        self.assertTrue(any("RFC 7946" in m for m in messages))
+
+    def test_warns_when_coordinates_outside_wgs84_range(self):
+        x = numpy.linspace(-200, 200, 5)
+        y = numpy.linspace(-95, 95, 5)
+        x, y = numpy.meshgrid(x, y)
+        z = x + y
+        contour = plt.contour(x, y, z, levels=3)
+        import warnings
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            geojsoncontour.contour_to_geojson(
+                contour=contour, ndigits=3, strdump=True
+            )
+        messages = [str(w.message) for w in captured]
+        self.assertTrue(any("WGS 84" in m for m in messages))
 
     @staticmethod
     def polygon_area(coordinates):
