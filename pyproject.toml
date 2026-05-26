@@ -25,11 +25,12 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-  "geojson",
   "numpy",
   "matplotlib>=3.8",
-  "xarray",
 ]
+
+[project.optional-dependencies]
+netcdf = ["xarray"]
 [project.urls]
 Repository = "http://github.com/bartromgens/geojsoncontour"
 

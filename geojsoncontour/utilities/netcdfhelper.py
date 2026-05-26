@@ -1,13 +1,27 @@
 #!/usr/bin/python3.4
 # -*- encoding: utf-8 -*-
-"""Helper module for transformation of netCDF to GeoJSON."""
+"""Helper module for transformation of netCDF to GeoJSON.
 
-import xarray as xr
-from matplotlib import pyplot as plt
-import numpy as np
-import geojsoncontour
+Requires the ``netcdf`` extra to be installed::
+
+    pip install geojsoncontour[netcdf]
+"""
+
 import os
 import sys
+
+import numpy as np
+from matplotlib import pyplot as plt
+
+import geojsoncontour
+
+try:
+    import xarray as xr
+except ImportError as exc:  # pragma: no cover - exercised in environments without xarray
+    raise ImportError(
+        "geojsoncontour.utilities.netcdfhelper requires xarray. "
+        "Install with: pip install 'geojsoncontour[netcdf]'"
+    ) from exc
 
 
 def load(ncfile):
